@@ -1,0 +1,11 @@
+[0] W7ION-5>T7SWQS,RS0ISS*:`2(-l!s[/>"4v}Greetings from Seattle^
+[0] RS0ISS>0P0PS1,APRSAT:'v&l SI]ARISS-International Space Station=
+[0] KF0BMD-9>3Y4SQS,RS0ISS*:'pR"l `/>"F7}Space Command - cmoslabs.com/cmos-blog^
+[0] K7MT-6>APRS,RS0ISS*:=4638.45N/11157.30W`SGATE HELENA, MT DN46 {UISS54}
+[0] KF0BMD-6>3Y4RTZ,RS0ISS*:`pRll y/`"F1}CMOS Space Command Center <*>_%
+[0] KC7BXS-7>S3SSRX,RS0ISS*:`(ael*`[/>"7o}^
+[0] KB0VBZ>SXTSTP,RS0ISS*:`pZll `/>TH-D7 3 WATTS QUADRA
+[0] KC7BXS-7>S3SSRX,RS0ISS*:`(adl*s[/>"7o}sparkfel@gmail.com^
+[0] KW7IBE-1>TUUTZZ,RS0ISS*:'2H7l -/]146.520MHz Currently Monitoring WINLINK=
+[0] KC7BXS-7>S3SSRX,RS0ISS*:`(acl!7[/>"7q}^
+[0] RS0ISS>0P0PS0,APRSAT:'v&l SI]ARISS-International Space Station=
