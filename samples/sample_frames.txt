@@ -35,3 +35,5 @@
 [0] KC7BXS-7>S3SSRX,RS0ISS*:`(acl!7[/>"7q}sparkfel@gmail.com^
 [0] KB0VBZ>SXTSTP,RS0ISS*:`pZll `/>TH-D7 3 WATTS QUADRA
 [0] RS0ISS>0P0PS0,APRSAT:'v&l SI]ARISS-International Space Station=
+[0] KC7MG-9>CQ,RS0ISS*::KM6LYW   :Thanks from Jack  DM42 Az.
+
