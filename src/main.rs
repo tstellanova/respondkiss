@@ -9,10 +9,11 @@ use std::sync::Mutex;
 
 const MY_CALL:&'static str= "KM6NLE";
 const MY_CALL_EXT:&'static str= "KM6NLE-6";
+const MY_SYMBOL:&'static str="`"; // dish antenna
 
 static LAST_BROADCAST: Mutex<Option<DateTime<Local>>> = Mutex::new(None);
 
-const BROADCAST_TIMEOUT:TimeDelta= TimeDelta::seconds(90);  
+const BROADCAST_TIMEOUT:TimeDelta= TimeDelta::seconds(12);  
 
 fn handle_msgs(hay: &str, out_path: &Path) -> Result<() > {
 
@@ -30,13 +31,16 @@ fn handle_msgs(hay: &str, out_path: &Path) -> Result<() > {
   }
   let first_msg = results.get(0); 
 
-  let mut addr_results = vec![];
-  for (_, [whole_addressee, inner_addressee ] ) in addressee_re.captures_iter(&hay).map(|c| c.extract()) {
-      addr_results.push(( whole_addressee, inner_addressee));
+  let mut first_addressee = None;
+  if let Some(caps) = addressee_re.captures(&hay) {
+    if let Some(first_cap) = caps.get(1) {
+      first_addressee = Some(first_cap.as_str());
+     }
   }
-  let first_addressee = addr_results.get(0);
-  let now = Local::now();
+  println!("first_addressee: {:?}",first_addressee);
 
+  let now = Local::now();
+  let timestamp_str = format!("{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second());
 
   let mut broadcast_time_opt = *LAST_BROADCAST.lock().unwrap();
   if let Some(broadcast_time) = broadcast_time_opt {
@@ -50,18 +54,17 @@ fn handle_msgs(hay: &str, out_path: &Path) -> Result<() > {
     let origin = in_header.1;
     let dest = in_header.2;
  
-    let response =  
+    let mut response =  
       if dest.contains(MY_CALL) {
-        Some(format!("{}>{},ARISS:=3752.42N/12217.42W(QSL 73s", MY_CALL_EXT, origin))
+        Some(format!("{}>{},ARISS:=3752.42N/12217.42W{} QSL 73s", MY_CALL_EXT, origin,MY_SYMBOL))
       }
       else if dest.eq("ALL") {
-        Some(format!("{}>{},ARISS::{:<9}: Heard CM87uu",MY_CALL_EXT, origin, origin))
+        Some(format!("{}>{},ARISS::{:<9}: Heard CM87uu {}",MY_CALL_EXT, origin, origin, timestamp_str))
       }
       else if dest.eq("CQ") ||
 	dest.starts_with("AP") { // Catch all APRS clients -- sorry, Pakistan
         if let Some(addressee) = first_addressee {
-	  println!("RK addressee: {:?}", addressee);
-          if addressee.1.contains(&MY_CALL) {
+          if addressee.contains(&MY_CALL) {
             Some(format!("{}>CQ,ARISS::{:<9}: QSL 73s ",MY_CALL_EXT, origin))
           }
           else {
@@ -72,26 +75,28 @@ fn handle_msgs(hay: &str, out_path: &Path) -> Result<() > {
         }
         else {
           // acknowledge heard 
-          Some(format!("{}>CQ,ARISS::{:<9}: Heard CM87uu",MY_CALL_EXT, origin))
+          Some(format!("{}>CQ,ARISS::{:<9}: Heard CM87uu {} ",
+            	MY_CALL_EXT, origin, timestamp_str))
         }
       }
       else {
-        if broadcast_time_opt.is_none() {
-          // track the last 
-          broadcast_time_opt = Some(now);
-          Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W(Hello ARISS {:02}:{:02}:{:02}", 
-		MY_CALL_EXT, now.hour(), now.minute(), now.second()))
-        }
-        else {
-          None
-	}
+	None
       };
 
-    *LAST_BROADCAST.lock().unwrap() = broadcast_time_opt;
+    if response.is_none() && broadcast_time_opt.is_none() {
+      // we've been idle too long -- send something
+      response = Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W{} Hello ARISS {}",
+                MY_CALL_EXT, MY_SYMBOL, timestamp_str))
+    }
 
-    if response.is_none() {
+    if response.is_some() {
+      broadcast_time_opt = Some(now);
+      *LAST_BROADCAST.lock().unwrap() = broadcast_time_opt;
+    }
+    else {
       return Ok(())
     } 
+
     let new_msg = response.unwrap();
     let now_str = now.to_rfc3339();
     println!("RK {} out: {}", now_str, new_msg);
