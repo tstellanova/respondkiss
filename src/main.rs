@@ -65,6 +65,10 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
       if dest.contains(MY_CALL) {
         Some(format!("{}>{},ARISS:=3752.42N/12217.42W{} QSL 73s", MY_CALL_EXT, origin,MY_SYMBOL))
       }
+      else if origin.eq(MY_CALL_EXT) {
+        // don't respond to our own (repeated) messages
+        None
+      }
       else if dest.eq("CQ") ||  dest.starts_with("AP") { // Catch all APRS clients -- sorry, Pakistan
         // is there a specific addressee?
         if let Some(addressee) = addressee_opt {
