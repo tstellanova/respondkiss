@@ -13,7 +13,7 @@ const MY_SYMBOL:&'static str="`"; // dish antenna
 
 static LAST_BROADCAST: Mutex<Option<DateTime<Local>>> = Mutex::new(None);
 
-const BROADCAST_TIMEOUT:TimeDelta= TimeDelta::seconds(15);
+const BROADCAST_TIMEOUT:TimeDelta= TimeDelta::seconds(18);
 
 fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
 
