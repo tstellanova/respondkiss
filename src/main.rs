@@ -1,27 +1,38 @@
-use regex::Regex;
 use std::env;
 use std::fs;
+use core::mem;
+use std::collections::HashSet;
 use std::path::Path;
 use std::io::{BufWriter, Write};
 use notify::{Watcher, RecommendedWatcher, RecursiveMode, Result, Config, event::{EventKind, AccessKind, AccessMode} };
 use chrono::{DateTime, Local, TimeDelta, Timelike};
 use std::sync::Mutex;
+use regex_macro::regex;
+//use regex::Regex;
+use core::sync::atomic::{AtomicI64, Ordering};
 
 const MY_CALL:&'static str= "KM6NLE";
 const MY_CALL_EXT:&'static str= "KM6NLE-6";
 const MY_SYMBOL:&'static str="`"; // dish antenna
+//const HEARD_PREAMBLE:&'static str = "Heard";
 
-static LAST_BROADCAST: Mutex<Option<DateTime<Local>>> = Mutex::new(None);
+static SESSION_START_MS: AtomicI64 = AtomicI64::new(0);
+static LAST_BROADCAST_MS: AtomicI64 = AtomicI64::new(0);
 
-const BROADCAST_TIMEOUT:TimeDelta= TimeDelta::seconds(18);
+//static SESSION_START: Mutex<Option<DateTime<Local>>> = Mutex::new(None);
+//static LAST_BROADCAST: Mutex<Option<DateTime<Local>>> = Mutex::new(None);
+static SESSION_HERD: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+const BROADCAST_TIMEOUT:TimeDelta = TimeDelta::seconds(33);
+const SESSION_TIMEOUT:TimeDelta = TimeDelta::minutes(10);
 
 fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
 
   // in message must have "header : body" format messages
   let (msg_header, msg_body) = full_msg.split_once(':').unwrap();
 
-  let header_re = Regex::new(r"\[([0-9]+)\].([a-zA-Z0-9-_]+)>([a-zA-Z0-9-_]+)").unwrap();
-  let addressee_re = Regex::new(r":([ a-zA-Z0-9-\s]{9}):").unwrap();
+  let header_re = regex!(r"\[([0-9]+)\].([a-zA-Z0-9-_]+)>([a-zA-Z0-9-_]+)");
+  let addressee_re = regex!(r":([ a-zA-Z0-9-\s]{9}):");
 
   // sample messages from KISS inbox:
   // [0] RS0ISS>0P0PS1,APRSAT:'v&l SI]ARISS-International Space Station=
@@ -42,13 +53,72 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
   if let Some(caps) = addressee_re.captures(&msg_body) {
     if let Some(first_cap) = caps.get(1) {
       addressee_opt = Some(first_cap.as_str());
-      println!("addressee_opt: {:?}", addressee_opt);
+      //println!("addressee_opt: {:?}", addressee_opt);
     }
   }
 
   let now = Local::now();
   let timestamp_str = format!("{:02}:{:02}:{:02}", now.hour(), now.minute(), now.second());
+  
+  let session_start_opt = {
+    let prior_ms = SESSION_START_MS.load(Ordering::Relaxed);
+    if prior_ms != 0 {
+      if let Some(prior_dt) = DateTime::from_timestamp_millis(prior_ms) {
+        let elapsed = now.signed_duration_since(prior_dt);
+        if elapsed > SESSION_TIMEOUT { 
+          //clear session data 
+          *SESSION_HERD.lock().unwrap() = None;
+          SESSION_START_MS.store(0, Ordering::Relaxed);  
+          None
+        }
+        else { 
+          Some(prior_dt)  
+        } 
+      }
+      else { None } 
+    }
+    else { None }
+  };
 
+  
+  /*
+  let mut session_start_opt = *SESSION_START.lock().unwrap();
+  if let Some(start_time) =  session_start_opt  {
+   let elapsed = now.signed_duration_since(start_time);
+   if elapsed > SESSION_TIMEOUT {
+     session_start_opt = None;
+     //clear session data
+     *SESSION_HERD.lock().unwrap() = None;
+     *SESSION_START.lock().unwrap() = None;
+   }
+  }
+  */
+
+  // retrieve list of call signs heard during this session
+  let sess_herd_list = {
+    let mut state = SESSION_HERD.lock().expect("failed");
+    let new_state = mem::replace(&mut *state, None);
+    if new_state.is_none() { Vec::new() }
+    else { new_state.unwrap() }
+  };
+  let mut herd_set = HashSet::<String>::from_iter(sess_herd_list);
+
+  // expire the last broadcast time if we've been idle too long
+
+  let broadcast_time_opt = {
+    let prior_ms = LAST_BROADCAST_MS.load(Ordering::Relaxed);
+    if prior_ms != 0 {
+      if let Some(broadcast_time) = DateTime::from_timestamp_millis(prior_ms) {
+        let elapsed = now.signed_duration_since(broadcast_time);
+        if elapsed > BROADCAST_TIMEOUT { None } 
+        else { Some(broadcast_time) }
+      }
+      else { None }
+    }
+    else { None }
+  };
+
+  /*
   let mut broadcast_time_opt = *LAST_BROADCAST.lock().unwrap();
   if let Some(broadcast_time) = broadcast_time_opt {
     let elapsed = now.signed_duration_since(broadcast_time);
@@ -56,28 +126,43 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
       broadcast_time_opt = None;
     }
    }
+  */
 
   if let Some(in_header) = split_header_opt {
     let origin = in_header.1;
     let dest = in_header.2;
+
+    if !origin.eq(MY_CALL_EXT) && !origin.eq("RS0ISS") {
+        herd_set.insert(origin.to_string());
+    }
  
     let mut response_opt =
       if dest.contains(MY_CALL) {
-        Some(format!("{}>{},ARISS:=3752.42N/12217.42W{} QSL 73s", MY_CALL_EXT, origin,MY_SYMBOL))
+        //Some(format!("{}>{},ARISS:=3752.42N/12217.42W{} QSL 73s", MY_CALL_EXT, origin,MY_SYMBOL))
+        Some(format!("{}>{},ARISS:{} AFK QSO 73s CM87uu {}",MY_CALL_EXT, origin, MY_SYMBOL,  timestamp_str))
       }
       else if origin.eq(MY_CALL_EXT) {
         // don't respond to our own (repeated) messages
+        println!("RK: ignoring message from self");
         None
       }
-      else if dest.eq("CQ") ||  dest.starts_with("AP") { // Catch all APRS clients -- sorry, Pakistan
+      else if origin.eq("RS0ISS") && dest.starts_with("0P0PS") {
+	// [0] RS0ISS>0P0PS1,APRSAT:'v&l SI]ARISS-International Space Station=
+        // ARISS beacon sent when there's been no received packets for a while
+	// Send location beacon to ARISS at least once per session
+        Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W{} CQ via ARISS {}",
+                                MY_CALL_EXT, MY_SYMBOL, timestamp_str))
+      }
+      else if dest.eq("CQ") || dest.starts_with("AP") { // Catch all APRS clients -- sorry, Pakistan
         // is there a specific addressee?
         if let Some(addressee) = addressee_opt {
-          if addressee.contains(&MY_CALL) {
-            Some(format!("{}>CQ,ARISS::{:<9}: QSL 73s {}",MY_CALL_EXT, origin, timestamp_str))
+          if addressee.contains(&MY_CALL_EXT) || addressee.contains("CQ")  {
+            Some(format!("{}>CQ,ARISS::{:<9}: AFK QSL 73s CM87uu {}",MY_CALL_EXT, origin, timestamp_str))
           }
           else {
             // there's an addressee who's not us: Don't respond
-	          None
+            println!("RK: ignore addressee {}", addressee);
+	    None
           }  
         }
         else {
@@ -86,24 +171,49 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
             Some(format!("{}>CQ,ARISS::{:<9}: QSL 73s {}",MY_CALL_EXT, origin, timestamp_str))
           }
           else {
-            // acknowledge heard
-            Some(format!("{}>CQ,ARISS::{:<9}: Heard CM87uu {}", MY_CALL_EXT, origin, timestamp_str))
+            // acknowledge heards directly
+            //Some(format!("{}>CQ,ARISS::{:<9}: Heard CM87uu {}", MY_CALL_EXT, origin, timestamp_str))
+            None
           }
         }
       }
       else {
-	      None
+        println!("RK wacky src: {:?} dst: {:?}", origin, dest);
+	None
       };
 
     if response_opt.is_none() && broadcast_time_opt.is_none() {
       // we've been idle too long -- send something
-      response_opt = Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W{} Hello ARISS {}",
-                                  MY_CALL_EXT, MY_SYMBOL, timestamp_str))
+      println!("RK: idle too long -- beacon!");
+      if herd_set.is_empty() {
+        // Send location beacon to ARISS
+        response_opt = Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W{} CQ via ARISS {}",
+                                  MY_CALL_EXT, MY_SYMBOL, timestamp_str));
+      }
+      else {
+        // ack the heard list
+        let heards = herd_set.iter().map(|x| x.to_string() + ",").collect::<String>();
+        response_opt = Some(format!("{}>CQ,ARISS::Heard    :{}", MY_CALL_EXT, heards ));
+        if heards.len() > 14 {
+          herd_set.clear();
+        }
+      }
+    }
+
+    if !herd_set.is_empty() {
+      let herd_out  = herd_set.iter().map(String::from).collect();
+      *SESSION_HERD.lock().unwrap() = Some(herd_out);
     }
 
     if response_opt.is_some() {
-      broadcast_time_opt = Some(now);
-      *LAST_BROADCAST.lock().unwrap() = broadcast_time_opt;
+      let now_ms = now.timestamp_millis();
+      if session_start_opt.is_none() {
+        SESSION_START_MS.store(now_ms, Ordering::Relaxed);
+	//*SESSION_START.lock().unwrap() = Some(now);
+      }   
+
+      LAST_BROADCAST_MS.store(now_ms, Ordering::Relaxed);
+      //*LAST_BROADCAST.lock().unwrap() = Some(now);
     }
     else {
       return Ok(())
