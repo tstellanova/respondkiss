@@ -14,15 +14,16 @@ use indexmap::IndexSet;
 const MY_CALL:&'static str = "KM6NLE";
 const MY_CALL_EXT:&'static str = "KM6NLE-6";
 const MY_SYMBOL:&'static str = "`"; // dish antenna
-const BLN_QSL_GROUP:&'static str = "BLNQSL1/1"; // Bulletin QSL group
-
+const BLN_QSL_BASE:&'static str = "BLNQSL"; // Base bulletin QSL group
+//const BLN_QSL_GROUP:&'static str = "BLNQSL1/1"; // Bulletin QSL group
+const HEARD_GROUP:&'static str = "BLN0QSLs "; // Bulletin 0 QSL group
 static SESSION_START_MS: AtomicI64 = AtomicI64::new(0);
 static LAST_BROADCAST_MS: AtomicI64 = AtomicI64::new(0);
 
 static HEARD_LIST: Mutex<Vec<String>> = Mutex::new(vec!());
 static ACKED_LIST: Mutex<Vec<String>> = Mutex::new(vec!());
 
-const BROADCAST_TIMEOUT:TimeDelta = TimeDelta::seconds(31);
+const BROADCAST_TIMEOUT:TimeDelta = TimeDelta::seconds(27);
 const SESSION_TIMEOUT:TimeDelta = TimeDelta::minutes(10);
 
 fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
@@ -30,7 +31,7 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
   // in message must have "header : body" format messages
   let (msg_header, msg_body) = full_msg.split_once(':').unwrap();
   if !msg_header.contains("RS0ISS") {
-    println!("RK ignore_local_rx");
+    println!("RK ignore_local_rx \n");
     return Ok(())
   } 
   let header_re = regex!(r"\[([0-9]+)\].([a-zA-Z0-9-_]+)>([a-zA-Z0-9-_]+)");
@@ -118,7 +119,7 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
     let mut response_opt =
       if dest.contains(MY_CALL) {
         let new_ack = ack_set.insert(origin.to_string());        
-        if new_ack { Some(format!("{}>{},ARISS:{} AFK QSO 73 CM87uu {}",MY_CALL_EXT, origin, MY_SYMBOL,  timestamp_str)) }
+        if new_ack { Some(format!("{}>{},ARISS:AFK QSO 73 CM87uu {}",MY_CALL_EXT, origin, timestamp_str)) }
         else { None } 
       }
       else if origin.eq(MY_CALL_EXT) {
@@ -127,20 +128,32 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
         None
       }
       else if origin.eq("RS0ISS") && dest.starts_with("0P0PS") {
-        // ARISS beacon sent when there's been no received packets for a while
+        // ARISS beacon sent when there's been no received packets for a while (as little as 3 seconds, every 3 minutes)
 	// [0] RS0ISS>0P0PS1,APRSAT:'v&l SI]ARISS-International Space Station=
 	// Send location beacon to ARISS at least once per session
-        Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W{} CQ via ARISS {}", MY_CALL_EXT, MY_SYMBOL, timestamp_str))
+        if session_start_opt.is_none() {
+          let now_ms = now.timestamp_millis();
+          SESSION_START_MS.store(now_ms, Ordering::Relaxed);
+          // Send location beacon to ARISS
+          Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W{} CQ via ARISS {}",
+                                  MY_CALL_EXT, MY_SYMBOL, timestamp_str))
+        }
+        else { None } 
       }
       else if dest.eq("CQ") || dest.starts_with("AP") { // Catch all APRS clients -- sorry, Pakistan
         // is there a specific addressee?
         if let Some(addressee) = addressee_opt {
-          if addressee.contains(&MY_CALL_EXT) || addressee.contains("CQ")  {
+          if addressee.contains(&MY_CALL_EXT) {
             let new_ack = ack_set.insert(origin.to_string());
             if new_ack { Some(format!("{}>CQ,ARISS::{:<9}:AFK QSL 73 CM87uu {}",MY_CALL_EXT, origin, timestamp_str)) }
             else { None }
           }
-          else if addressee.contains(&BLN_QSL_GROUP) || addressee.contains("Heard") {
+          else if addressee.contains("CQ")  {
+            let new_ack = ack_set.insert(origin.to_string());
+            if new_ack { Some(format!("{}>CQ,ARISS::{:<9}:QSL 73 CM87 {}",MY_CALL_EXT, origin, timestamp_str)) }
+            else { None }
+          }
+          else if addressee.contains(&BLN_QSL_BASE) || addressee.contains(&HEARD_GROUP) || addressee.contains("Heard") {
             println!("RK Heard/BLNSQL");
             if msg_body.contains(MY_CALL) {
               let new_ack = ack_set.insert(origin.to_string());
@@ -173,17 +186,18 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
     if response_opt.is_none() && broadcast_time_opt.is_none() {
       // we've been idle too long -- send something
       println!("RK: idle beacon!");
-      if session_start_opt.is_none() {
+      if heard_set.len() > 0 {
+        // ack the heard list
+        let heards = heard_set.iter().map(|x| x.to_string() + ",").collect::<String>();
+        response_opt = Some(format!("{}>CQ,ARISS::{}:{}", MY_CALL_EXT, HEARD_GROUP, heards ));
+        if heard_set.len() > 3 { heard_set.clear();  } 
+      }
+      else {
         // Send location beacon to ARISS
         response_opt = Some(format!("{}>CQ,ARISS:=3752.42N/12217.42W{} CQ via ARISS {}",
                                   MY_CALL_EXT, MY_SYMBOL, timestamp_str));
         let now_ms = now.timestamp_millis();
         SESSION_START_MS.store(now_ms, Ordering::Relaxed);
-      }
-      else if heard_set.len() > 1 {
-        // ack the heard list
-        let heards = heard_set.iter().map(|x| x.to_string() + ",").collect::<String>();
-        response_opt = Some(format!("{}>CQ,ARISS::{}:{}", MY_CALL_EXT, BLN_QSL_GROUP, heards ));
       } 
     }
 
@@ -191,6 +205,9 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
     if !heard_set.is_empty() {
       let heard_out  = heard_set.iter().map(String::from).collect();
       *HEARD_LIST.lock().unwrap() = heard_out;
+    }
+    else {
+      *HEARD_LIST.lock().unwrap() = vec!();
     }
 
     // stash the acked list for the next wakeup
@@ -209,7 +226,7 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
 
     let resp_msg = response_opt.unwrap();
     let now_str = now.to_rfc3339();
-    println!("RK {} out:\n{}", now_str, resp_msg);
+    println!("RK {} out:\n{}\n", now_str, resp_msg);
 
     let full_out_path = out_path.join(now_str);
     let out_file = fs::File::create(full_out_path)?;
