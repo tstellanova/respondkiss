@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 //use core::mem;
-use std::collections::HashSet;
+//use std::collections::HashSet;
 use std::path::Path;
 use std::io::{BufWriter, Write};
 use notify::{Watcher, RecommendedWatcher, RecursiveMode, Result, Config, event::{EventKind, AccessKind, AccessMode} };
@@ -69,10 +69,11 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
     if let Some(prior_dt) = DateTime::from_timestamp_millis(prior_ms) {
       let elapsed = now.signed_duration_since(prior_dt);
       if elapsed > SESSION_TIMEOUT { 
-        //clear session data 
+        println!("RK: clear session data, elapsed: {}", elapsed);
         *HEARD_LIST.lock().unwrap() = vec!();
         *ACKED_LIST.lock().unwrap() = vec!();
-        SESSION_START_MS.store(0, Ordering::Relaxed);  
+        let now_ms = now.timestamp_millis();
+        SESSION_START_MS.store(now_ms, Ordering::Relaxed);
         None
       }
       else { Some(prior_dt) } 
@@ -87,14 +88,16 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
     .into_iter()
     .collect::<IndexSet<_>>()
   };
+  println!("RK heard_set.len: {}", heard_set.len());
 
   // retrieve list of call signs acked during this session
   let mut ack_set = {
     ACKED_LIST.lock().expect("failed")
     .clone()
     .into_iter()
-    .collect::<HashSet<_>>()
+    .collect::<IndexSet<_>>()
   };
+  println!("RK ack_set.len: {}", ack_set.len());
 
   // expire the last broadcast time if we've been idle too long
   let broadcast_time_opt = {
@@ -110,16 +113,17 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
 
   if let Some(in_header) = split_header_opt {
     let origin = in_header.1;
+    let origin_str =  origin.to_string();
     let dest = in_header.2;
 
     if !origin.eq(MY_CALL_EXT) && !origin.eq("RS0ISS") {
-      heard_set.insert(origin.to_string());
+      heard_set.insert(origin_str.clone());
     }
  
     let mut response_opt =
       if dest.contains(MY_CALL) {
-        let new_ack = ack_set.insert(origin.to_string());        
-        if new_ack { Some(format!("{}>{},ARISS:AFK QSO 73 CM87uu {}",MY_CALL_EXT, origin, timestamp_str)) }
+        let new_ack = ack_set.insert(origin_str.clone());        
+        if new_ack { Some(format!("{}>{},ARISS:AFK QSL 73 CM87uu {}",MY_CALL_EXT, origin, timestamp_str)) }
         else { None } 
       }
       else if origin.eq(MY_CALL_EXT) {
@@ -144,19 +148,20 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
         // is there a specific addressee?
         if let Some(addressee) = addressee_opt {
           if addressee.contains(&MY_CALL_EXT) {
-            let new_ack = ack_set.insert(origin.to_string());
+            let new_ack = ack_set.insert(origin_str.clone());
             if new_ack { Some(format!("{}>CQ,ARISS::{:<9}:AFK QSL 73 CM87uu {}",MY_CALL_EXT, origin, timestamp_str)) }
             else { None }
           }
           else if addressee.contains("CQ")  {
-            let new_ack = ack_set.insert(origin.to_string());
-            if new_ack { Some(format!("{}>CQ,ARISS::{:<9}:QSL 73 CM87 {}",MY_CALL_EXT, origin, timestamp_str)) }
+            if !ack_set.contains(&origin_str) {
+              Some(format!("{}>CQ,ARISS::{:<9}:QSL 73 CM87 {}",MY_CALL_EXT, origin, timestamp_str)) 
+            }
             else { None }
           }
           else if addressee.contains(&BLN_QSL_BASE) || addressee.contains(&HEARD_GROUP) || addressee.contains("Heard") {
             println!("RK Heard/BLNSQL");
             if msg_body.contains(MY_CALL) {
-              let new_ack = ack_set.insert(origin.to_string());
+              let new_ack = ack_set.insert(origin_str.clone());
               if new_ack { Some(format!("{}>CQ,ARISS::{:<9}:TNX 73 CM87uu {}",MY_CALL_EXT, origin, timestamp_str)) }
               else { None }
             }
@@ -171,7 +176,7 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
         else {
           // no addressee....does the body contain our call sign?
           if msg_body.contains(MY_CALL) || msg_body.contains("cq") || msg_body.contains("CQ") {
-            let new_ack = ack_set.insert(origin.to_string());
+            let new_ack = ack_set.insert(origin_str.clone());
             if new_ack { Some(format!("{}>CQ,ARISS::{:<9}:QSL 73 CM87 {}",MY_CALL_EXT, origin, timestamp_str)) }
             else { None } 
           }
@@ -186,11 +191,14 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
     if response_opt.is_none() && broadcast_time_opt.is_none() {
       // we've been idle too long -- send something
       println!("RK: idle beacon!");
-      if heard_set.len() > 0 {
+      if heard_set.len() > 1 {
         // ack the heard list
         let heards = heard_set.iter().map(|x| x.to_string() + ",").collect::<String>();
         response_opt = Some(format!("{}>CQ,ARISS::{}:{}", MY_CALL_EXT, HEARD_GROUP, heards ));
-        if heard_set.len() > 3 { heard_set.clear();  } 
+        if heard_set.len() > 4 {
+          println!("RK: clear heard_set");
+          heard_set.clear();
+        } 
       }
       else {
         // Send location beacon to ARISS
@@ -203,7 +211,8 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
 
     // stash the heard list for the next wakeup
     if !heard_set.is_empty() {
-      let heard_out  = heard_set.iter().map(String::from).collect();
+      let heard_out:  Vec<_>  = heard_set.iter().map(String::from).collect();
+      println!("RK heard_out.len(): {}", heard_out.len());
       *HEARD_LIST.lock().unwrap() = heard_out;
     }
     else {
@@ -212,7 +221,8 @@ fn handle_in_msg(full_msg: &str, out_path: &Path) -> Result<() > {
 
     // stash the acked list for the next wakeup
     if !ack_set.is_empty() {
-      let ack_out = ack_set.iter().map(String::from).collect();
+      let ack_out: Vec<_> = ack_set.iter().map(String::from).collect();
+      println!("RK ack_out.len(): {}", ack_out.len());
       *ACKED_LIST.lock().unwrap() = ack_out;
     }
 
